@@ -1,0 +1,62 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/MyUname.c'
+      - 'Makefile'
+      - '.github/workflows/build.yml'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout MyUname-kpm
+        uses: actions/checkout@v5
+
+      - name: Cache toolchain & KernelPatch headers
+        id: cache-deps
+        uses: actions/cache@v4
+        with:
+          key: kpdeps-v1-${{ github.run_id }}
+          restore-keys: kpdeps-v1-
+          path: |
+            toolchain
+            KernelPatch
+
+      - name: Checkout KernelPatch (headers only)
+        if: steps.cache-deps.outputs.cache-hit != 'true'
+        uses: actions/checkout@v5
+        with:
+          repository: bmax121/KernelPatch
+          path: KernelPatch
+          sparse-checkout: |
+            kernel/include/
+            kernel/patch/include/
+            kernel/linux/include/
+            kernel/linux/arch/arm64/include/
+            kernel/linux/tools/arch/arm64/include/
+
+      - name: Checkout toolchain
+        if: steps.cache-deps.outputs.cache-hit != 'true'
+        uses: actions/checkout@v5
+        with:
+          repository: epicxafang/aarch64-none-elf-toolchain
+          path: toolchain
+
+      - name: Build
+        env:
+          TARGET_COMPILE: ${{ github.workspace }}/toolchain/bin/aarch64-none-elf-
+          KP_DIR: ${{ github.workspace }}/KernelPatch
+        run: make clean && make
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MyUname
+          path: MyUname.kpm
+          retention-days: 30
