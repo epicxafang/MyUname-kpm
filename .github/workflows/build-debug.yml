@@ -1,4 +1,4 @@
-name: Build Release
+name: Build Debug
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
     paths:
       - 'src/MyUname.c'
       - 'Makefile'
-      - '.github/workflows/build.yml'
+      - '.github/workflows/build-debug.yml'
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -48,15 +48,15 @@ jobs:
           repository: epicxafang/aarch64-none-elf-toolchain
           path: toolchain
 
-      - name: Build
+      - name: Build Debug
         env:
           TARGET_COMPILE: ${{ github.workspace }}/toolchain/bin/aarch64-none-elf-
           KP_DIR: ${{ github.workspace }}/KernelPatch
-        run: make clean && make
+        run: make clean && make debug
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MyUname-release
+          name: MyUname-debug
           path: MyUname.kpm
           retention-days: 30
