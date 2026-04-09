@@ -38,8 +38,6 @@ struct new_utsname {
 static char fake_release[FIELD_LEN];
 static char fake_version[FIELD_LEN];
 static int  fake_active;
-static int  fake_release_len;
-static int  fake_version_len;
 
 static void *uts_ns = NULL;
 static int  uts_name_offset = 0;
@@ -83,7 +81,7 @@ found_name:;
 			return;
 		}
 	}
-		logke("[MyUname] desc tag not found before name");
+	logke("[MyUname] desc tag not found before name");
 }
 
 static void update_desc(void)
@@ -96,20 +94,18 @@ static void update_desc(void)
 	memset(desc_data, 0, desc_cap);
 
 	if (fake_active) {
-		if (fake_release_len > 0 && fake_version_len > 0) {
-			int need = fake_release_len + fake_version_len + 4;
-			if (need < desc_cap)
-				n = snprintf(desc_data, desc_cap,
-					"R:%s T:%s", fake_release, fake_version);
-			else
-				n = snprintf(desc_data, desc_cap,
-					"R:\xe2\x9c\x85 T:\xe2\x9c\x85");
-		} else if (fake_release_len > 0)
+		int has_rel = (fake_release[0] != '\0');
+		int has_ver = (fake_version[0] != '\0');
+
+		if (has_rel && has_ver)
 			n = snprintf(desc_data, desc_cap,
-				"R:%s", fake_release);
-		else if (fake_version_len > 0)
+				"R:\xe2\x9c\x85 T:\xe2\x9c\x85");
+		else if (has_rel)
 			n = snprintf(desc_data, desc_cap,
-				"T:%s", fake_version);
+				"R:\xe2\x9c\x85");
+		else if (has_ver)
+			n = snprintf(desc_data, desc_cap,
+				"T:\xe2\x9c\x85");
 		else
 			n = snprintf(desc_data, desc_cap, "(active)");
 	} else {
@@ -194,10 +190,10 @@ static long mu_ctl(const char *args, char *__user out_msg, int outlen)
 
 	if (!strcmp(args, "status")) {
 		pos = snprintf(resp, RESP_BUF_SIZE,
-			"active=%d release='%s' time='%s' desc=%s",
+			"active=%d release='%s' version='%s' desc=%s",
 			fake_active,
-			fake_active ? fake_release : "(real)",
-			fake_active ? fake_version : "(real)",
+			fake_active && fake_release[0] ? fake_release : "(real)",
+			fake_active && fake_version[0] ? fake_version : "(real)",
 			desc_data ? "ok" : "n/a");
 		goto out;
 	}
@@ -206,8 +202,6 @@ static long mu_ctl(const char *args, char *__user out_msg, int outlen)
 		memset(fake_release, 0, sizeof(fake_release));
 		memset(fake_version, 0, sizeof(fake_version));
 		fake_active = 0;
-		fake_release_len = 0;
-		fake_version_len = 0;
 		update_desc();
 		pos = snprintf(resp, RESP_BUF_SIZE, "cleared");
 		goto out;
@@ -218,7 +212,7 @@ static long mu_ctl(const char *args, char *__user out_msg, int outlen)
 		while (*p == ' ' || *p == '\t') p++;
 		if (!*p) {
 			pos = snprintf(resp, RESP_BUF_SIZE,
-				"error: usage: set R:<release> T:<time>");
+				"error: usage: set R:<release> T:<version>");
 			goto out;
 		}
 
@@ -241,7 +235,7 @@ static long mu_ctl(const char *args, char *__user out_msg, int outlen)
 				if (is_rel) has_rel = 1; else has_ver = 1;
 			} else {
 				pos = snprintf(resp, RESP_BUF_SIZE,
-					"error: bad token '%c', use R:<rel> T:<time>", *p);
+					"error: bad token '%c', use R:<rel> T:<ver>", *p);
 				goto out;
 			}
 		}
@@ -252,21 +246,15 @@ static long mu_ctl(const char *args, char *__user out_msg, int outlen)
 			goto out;
 		}
 
-		if (has_rel) {
-			int vlen = (int)strlen(tmp_rel);
-			memcpy(fake_release, tmp_rel, vlen + 1);
-			fake_release_len = vlen;
-		}
-		if (has_ver) {
-			int vlen = (int)strlen(tmp_ver);
-			memcpy(fake_version, tmp_ver, vlen + 1);
-			fake_version_len = vlen;
-		}
+		if (has_rel)
+			memcpy(fake_release, tmp_rel, strlen(tmp_rel) + 1);
+		if (has_ver)
+			memcpy(fake_version, tmp_ver, strlen(tmp_ver) + 1);
 		fake_active = 1;
 		update_desc();
 
 		pos = snprintf(resp, RESP_BUF_SIZE,
-			"ok release='%s' time='%s'",
+			"ok release='%s' version='%s'",
 			has_rel ? fake_release : "(unchanged)",
 			has_ver ? fake_version : "(unchanged)");
 		goto out;
@@ -297,10 +285,10 @@ static void before_uname(hook_fargs1_t *args, void *udata)
 
 	memcpy(&tmp, (char *)uts_ns + uts_name_offset, UTSNAME_SIZE);
 
-	if (fake_release_len > 0)
-		memcpy(tmp.release, fake_release, fake_release_len + 1);
-	if (fake_version_len > 0)
-		memcpy(tmp.version, fake_version, fake_version_len + 1);
+	if (fake_release[0])
+		memcpy(tmp.release, fake_release, strlen(fake_release) + 1);
+	if (fake_version[0])
+		memcpy(tmp.version, fake_version, strlen(fake_version) + 1);
 
 	ret = compat_copy_to_user(ubuf, &tmp, UTSNAME_SIZE);
 	args->ret = ret > 0 ? 0 : -EFAULT;
@@ -362,8 +350,6 @@ static long mu_exit(void *__user reserved)
 
 	memset(fake_release, 0, sizeof(fake_release));
 	memset(fake_version, 0, sizeof(fake_version));
-	fake_release_len = 0;
-	fake_version_len = 0;
 	uts_ns = NULL;
 	uts_name_offset = 0;
 	desc_data = NULL;
