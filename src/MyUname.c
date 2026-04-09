@@ -112,10 +112,6 @@ static void update_desc(void)
 		n = snprintf(desc_data, desc_cap, "(idle)");
 	}
 
-	if (n >= desc_cap)
-		n = desc_cap - 1;
-	if (n >= 0)
-		desc_data[n] = '\0';
 	logkd("[MyUname] wrote desc='%s' len=%d cap=%d",
 		desc_data, n, desc_cap);
 
