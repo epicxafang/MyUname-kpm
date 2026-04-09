@@ -189,12 +189,12 @@ static long mu_ctl(const char *args, char *__user out_msg, int outlen)
 	}
 
 	if (!strcmp(args, "status")) {
-		pos = snprintf(resp, RESP_BUF_SIZE,
-			"active=%d release='%s' version='%s' desc=%s",
+		logki("[MyUname] active=%d release='%s' version='%s' desc=%s",
 			fake_active,
 			fake_active && fake_release[0] ? fake_release : "(real)",
 			fake_active && fake_version[0] ? fake_version : "(real)",
 			desc_data ? "ok" : "n/a");
+		pos = snprintf(resp, RESP_BUF_SIZE, "ok");
 		goto out;
 	}
 
