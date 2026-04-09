@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.2.0] - 2026-04-09
+## [0.2.0] - 2026-04-10
 
 ### Changed
 - **Hook 回调从 after 迁移至 before** — 在 `uname` 系统调用执行前直接拦截并返回伪造数据（`skip_origin=1`），完全阻止真实调用执行，消除 TOCTOU 竞态条件
