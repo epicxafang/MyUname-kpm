@@ -72,10 +72,10 @@ found_name:;
 	for (p2 = p; p2 > lo + DESC_TAG_LEN; p2--) {
 		if (memcmp((void *)(p2 - DESC_TAG_LEN), DESC_TAG, DESC_TAG_LEN) == 0) {
 			desc_data = (char *)p2;
-			char *end = desc_data;
-			while (*end && end < desc_data + KPM_DESCRIPTION_LEN)
-				end++;
-			desc_cap = (int)(end - desc_data);
+			char *next = desc_data;
+			while (*next && next < desc_data + KPM_DESCRIPTION_LEN)
+				next++;
+			desc_cap = (int)(next - desc_data);
 			if (desc_cap <= 0)
 				desc_cap = KPM_DESCRIPTION_LEN;
 			logkd("[MyUname] desc cap=%d @%llx", desc_cap,
@@ -96,10 +96,15 @@ static void update_desc(void)
 	memset(desc_data, 0, desc_cap);
 
 	if (fake_active) {
-		if (fake_release_len > 0 && fake_version_len > 0)
-			n = snprintf(desc_data, desc_cap,
-				"R:%s T:%s", fake_release, fake_version);
-		else if (fake_release_len > 0)
+		if (fake_release_len > 0 && fake_version_len > 0) {
+			int need = fake_release_len + fake_version_len + 4;
+			if (need < desc_cap)
+				n = snprintf(desc_data, desc_cap,
+					"R:%s T:%s", fake_release, fake_version);
+			else
+				n = snprintf(desc_data, desc_cap,
+					"R:\xe2\x9c\x85 T:\xe2\x9c\x85");
+		} else if (fake_release_len > 0)
 			n = snprintf(desc_data, desc_cap,
 				"R:%s", fake_release);
 		else if (fake_version_len > 0)
@@ -227,15 +232,13 @@ static long mu_ctl(const char *args, char *__user out_msg, int outlen)
 				p += 2;
 				char *dst = is_rel ? tmp_rel : tmp_ver;
 				int vlen = 0;
-				while (*p && *p != ' ' && *p != '\t') {
+				while (*p && !((*p == 'R' || *p == 'T') && *(p + 1) == ':')) {
 					if (vlen < FIELD_LEN - 1)
 						dst[vlen++] = *p;
 					p++;
 				}
 				dst[vlen] = '\0';
 				if (is_rel) has_rel = 1; else has_ver = 1;
-			} else if (*p == ' ' || *p == '\t') {
-				p++;
 			} else {
 				pos = snprintf(resp, RESP_BUF_SIZE,
 					"error: bad token '%c', use R:<rel> T:<time>", *p);
