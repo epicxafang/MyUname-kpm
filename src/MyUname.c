@@ -11,7 +11,7 @@
 #include <uapi/asm-generic/unistd.h>
 
 KPM_NAME("MyUname");
-KPM_VERSION("0.2.0");
+KPM_VERSION("0.3.0");
 KPM_LICENSE("AGPLv3");
 KPM_AUTHOR("时汐安");
 KPM_DESCRIPTION("Spoof uname release and version");
@@ -26,6 +26,8 @@ KPM_DESCRIPTION("Spoof uname release and version");
 #define DESC_TAG        "description="
 #define DESC_TAG_LEN    12
 
+enum { MODE_HOOK, MODE_MEMWRITE };
+
 struct new_utsname {
 	char sysname[FIELD_LEN];
 	char nodename[FIELD_LEN];
@@ -37,17 +39,20 @@ struct new_utsname {
 
 static char fake_release[FIELD_LEN];
 static char fake_version[FIELD_LEN];
+static char orig_release[FIELD_LEN];
+static char orig_version[FIELD_LEN];
 static int  fake_active;
+static int  orig_saved;
+static int  cur_mode = MODE_HOOK;
 
 static void *uts_ns = NULL;
 static int  uts_name_offset = 0;
 
+static char *release_ptr;
+static char *version_ptr;
+
 static char *desc_data = NULL;
 static int  desc_cap = 0;
-
-#ifdef MYUNAME_DEBUG
-static char prch(unsigned char c) { return (c >= 0x20 && c < 0x7f) ? c : '.'; }
-#endif
 
 static void locate_desc(void)
 {
@@ -96,173 +101,98 @@ static void update_desc(void)
 	if (fake_active) {
 		int has_rel = (fake_release[0] != '\0');
 		int has_ver = (fake_version[0] != '\0');
+		const char *tag = (cur_mode == MODE_MEMWRITE) ? "[mem]" : "[hook]";
 
 		if (has_rel && has_ver)
 			n = snprintf(desc_data, desc_cap,
-				"R:\xe2\x9c\x85 T:\xe2\x9c\x85");
+				"R:\xe2\x9c\x85 T:\xe2\x9c\x85 %s", tag);
 		else if (has_rel)
 			n = snprintf(desc_data, desc_cap,
-				"R:\xe2\x9c\x85");
+				"R:\xe2\x9c\x85 %s", tag);
 		else if (has_ver)
 			n = snprintf(desc_data, desc_cap,
-				"T:\xe2\x9c\x85");
+				"T:\xe2\x9c\x85 %s", tag);
 		else
-			n = snprintf(desc_data, desc_cap, "(active)");
+			n = snprintf(desc_data, desc_cap, "(active) %s", tag);
 	} else {
 		n = snprintf(desc_data, desc_cap, "(idle)");
 	}
 
 	logkd("[MyUname] wrote desc='%s' len=%d cap=%d",
 		desc_data, n, desc_cap);
-
-#ifdef MYUNAME_DEBUG
-	{
-		char *s = desc_data - 32;
-		int i;
-		logkd("[MyUname] === DUMP .kpm.info (%llx) ===",
-			(unsigned long long)desc_data);
-		for (i = 0; i < 128; i += 16) {
-			logkd("[MyUname] +%03d: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x |%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c|",
-				i,
-				(unsigned char)s[i+0], (unsigned char)s[i+1],
-				(unsigned char)s[i+2], (unsigned char)s[i+3],
-				(unsigned char)s[i+4], (unsigned char)s[i+5],
-				(unsigned char)s[i+6], (unsigned char)s[i+7],
-				(unsigned char)s[i+8], (unsigned char)s[i+9],
-				(unsigned char)s[i+10], (unsigned char)s[i+11],
-				(unsigned char)s[i+12], (unsigned char)s[i+13],
-				(unsigned char)s[i+14], (unsigned char)s[i+15],
-				prch(s[i+0]), prch(s[i+1]),
-				prch(s[i+2]), prch(s[i+3]),
-				prch(s[i+4]), prch(s[i+5]),
-				prch(s[i+6]), prch(s[i+7]),
-				prch(s[i+8]), prch(s[i+9]),
-				prch(s[i+10]), prch(s[i+11]),
-				prch(s[i+12]), prch(s[i+13]),
-				prch(s[i+14]), prch(s[i+15]));
-		}
-
-		s = desc_data;
-		logkd("[MyUname] --- kernel get_modinfo sim ---");
-		{
-			char *base = s;
-			while (base > s - 256 && memcmp(base, "name=", 5))
-				base--;
-			unsigned long sz = 512;
-			char *p = base;
-			char *found = NULL;
-			const char tag[] = "description";
-			int tlen = 11, step = 0;
-			for (; p && sz > 0; step++) {
-				logkd("[MyUname] step%d @%llx '%.20s'",
-					step, (unsigned long long)p, p);
-				if (strncmp(p, tag, tlen) == 0 && p[tlen] == '=') {
-					found = p + tlen + 1;
-					logkd("[MyUname] FOUND val='%s' @%llx off=%lld",
-						found, (unsigned long long)found,
-						(long long)(found - desc_data));
-					break;
-				}
-				while (*p) { p++; if (--sz <= 0) break; }
-				if (sz <= 0) break;
-				while (!*p) { p++; if (--sz <= 0) break; }
-			}
-			if (!found)
-				logke("[MyUname] NOT FOUND after %d steps", step);
-		}
-	}
-#endif
 }
 
-static long mu_ctl(const char *args, char *__user out_msg, int outlen)
+static void apply_memwrite(void)
 {
-	char resp[RESP_BUF_SIZE];
-	int pos;
+	if (!uts_ns || !fake_active)
+		return;
 
-	if (!args || !*args) {
-		pos = snprintf(resp, RESP_BUF_SIZE, "unknown cmd");
-		goto out;
+	if (fake_release[0])
+		memcpy(release_ptr, fake_release, strlen(fake_release) + 1);
+
+	if (fake_version[0])
+		memcpy(version_ptr, fake_version, strlen(fake_version) + 1);
+
+	logki("[MyUname] memwritten release='%s' version='%s'",
+		fake_release, fake_version);
+}
+
+static void restore_original(void)
+{
+	if (!uts_ns || !orig_saved)
+		return;
+
+	memcpy(release_ptr, orig_release, FIELD_LEN);
+	memcpy(version_ptr, orig_version, FIELD_LEN);
+
+	logki("[MyUname] restored original release='%s' version='%s'",
+		orig_release, orig_version);
+}
+
+static void ensure_orig_saved(void)
+{
+	if (orig_saved)
+		return;
+	memcpy(orig_release, release_ptr, FIELD_LEN);
+	memcpy(orig_version, version_ptr, FIELD_LEN);
+	orig_saved = 1;
+	logki("[MyUname] original saved: release='%s' version='%s'",
+		orig_release, orig_version);
+}
+
+static void before_uname(hook_fargs1_t *args, void *udata);
+
+static void switch_to_hook(void)
+{
+	hook_err_t err;
+
+	if (cur_mode == MODE_HOOK)
+		return;
+
+	if (fake_active && orig_saved)
+		restore_original();
+
+	cur_mode = MODE_HOOK;
+	err = hook_syscalln(__NR_uname, 1, before_uname, NULL, NULL);
+	if (err)
+		logke("[MyUname] hook uname failed: %d", err);
+	logki("[MyUname] mode -> hook");
+}
+
+static void switch_to_memwrite(void)
+{
+	if (cur_mode == MODE_MEMWRITE)
+		return;
+
+	unhook_syscalln(__NR_uname, before_uname, NULL);
+
+	if (fake_active) {
+		ensure_orig_saved();
+		apply_memwrite();
 	}
 
-	if (!strcmp(args, "status")) {
-		logki("[MyUname] active=%d release='%s' version='%s' desc=%s",
-			fake_active,
-			fake_active && fake_release[0] ? fake_release : "(real)",
-			fake_active && fake_version[0] ? fake_version : "(real)",
-			desc_data ? "ok" : "n/a");
-		pos = snprintf(resp, RESP_BUF_SIZE, "ok");
-		goto out;
-	}
-
-	if (!strcmp(args, "clear")) {
-		memset(fake_release, 0, sizeof(fake_release));
-		memset(fake_version, 0, sizeof(fake_version));
-		fake_active = 0;
-		update_desc();
-		pos = snprintf(resp, RESP_BUF_SIZE, "cleared");
-		goto out;
-	}
-
-	if (!strncmp(args, "set ", 4) || !strncmp(args, "set\t", 4)) {
-		const char *p = args + 4;
-		while (*p == ' ' || *p == '\t') p++;
-		if (!*p) {
-			pos = snprintf(resp, RESP_BUF_SIZE,
-				"error: usage: set R:<release> T:<version>");
-			goto out;
-		}
-
-		char tmp_rel[FIELD_LEN] = {0};
-		char tmp_ver[FIELD_LEN] = {0};
-		int has_rel = 0, has_ver = 0;
-
-		while (*p) {
-			if ((*p == 'R' || *p == 'T') && *(p + 1) == ':') {
-				int is_rel = (*p == 'R');
-				p += 2;
-				char *dst = is_rel ? tmp_rel : tmp_ver;
-				int vlen = 0;
-				while (*p && !((*p == 'R' || *p == 'T') && *(p + 1) == ':')) {
-					if (vlen < FIELD_LEN - 1)
-						dst[vlen++] = *p;
-					p++;
-				}
-				dst[vlen] = '\0';
-				if (is_rel) has_rel = 1; else has_ver = 1;
-			} else {
-				pos = snprintf(resp, RESP_BUF_SIZE,
-					"error: bad token '%c', use R:<rel> T:<ver>", *p);
-				goto out;
-			}
-		}
-
-		if (!has_rel && !has_ver) {
-			pos = snprintf(resp, RESP_BUF_SIZE,
-				"error: no value specified");
-			goto out;
-		}
-
-		if (has_rel)
-			memcpy(fake_release, tmp_rel, strlen(tmp_rel) + 1);
-		if (has_ver)
-			memcpy(fake_version, tmp_ver, strlen(tmp_ver) + 1);
-		fake_active = 1;
-		update_desc();
-
-		pos = snprintf(resp, RESP_BUF_SIZE,
-			"ok release='%s' version='%s'",
-			has_rel ? fake_release : "(unchanged)",
-			has_ver ? fake_version : "(unchanged)");
-		goto out;
-	}
-
-	pos = snprintf(resp, RESP_BUF_SIZE, "unknown cmd: %s", args);
-out:
-	if (pos >= RESP_BUF_SIZE)
-		pos = RESP_BUF_SIZE - 1;
-	if (out_msg && outlen > 0)
-		compat_copy_to_user(out_msg, resp, pos + 1);
-	return 0;
+	cur_mode = MODE_MEMWRITE;
+	logki("[MyUname] mode -> memwrite");
 }
 
 static void before_uname(hook_fargs1_t *args, void *udata)
@@ -272,7 +202,7 @@ static void before_uname(hook_fargs1_t *args, void *udata)
 	int ret;
 
 	(void)udata;
-	if (!fake_active)
+	if (!fake_active || cur_mode != MODE_HOOK)
 		return;
 
 	ubuf = (void __user *)syscall_argn((hook_fargs0_t *)args, 0);
@@ -291,6 +221,184 @@ static void before_uname(hook_fargs1_t *args, void *udata)
 	args->skip_origin = 1;
 }
 
+typedef int (*cmd_handler_t)(const char *rest, char *resp, int resplen);
+
+static int cmd_status(const char *rest, char *resp, int resplen)
+{
+	(void)rest;
+	return snprintf(resp, resplen,
+		"active=%d mode=%s release='%s' version='%s' desc=%s",
+		fake_active,
+		cur_mode == MODE_HOOK ? "hook" : "memwrite",
+		fake_active && fake_release[0] ? fake_release : "(real)",
+		fake_active && fake_version[0] ? fake_version : "(real)",
+		desc_data ? "ok" : "n/a");
+}
+
+static int cmd_clear(const char *rest, char *resp, int resplen)
+{
+	(void)rest;
+	if (cur_mode == MODE_MEMWRITE && fake_active && orig_saved)
+		restore_original();
+	fake_active = 0;
+	memset(fake_release, 0, sizeof(fake_release));
+	memset(fake_version, 0, sizeof(fake_version));
+	update_desc();
+	return snprintf(resp, resplen, "cleared");
+}
+
+static int cmd_hook(const char *rest, char *resp, int resplen)
+{
+	(void)rest;
+	switch_to_hook();
+	update_desc();
+	return snprintf(resp, resplen, "ok mode=hook");
+}
+
+static int cmd_write(const char *rest, char *resp, int resplen)
+{
+	(void)rest;
+	switch_to_memwrite();
+	update_desc();
+	return snprintf(resp, resplen, "ok mode=memwrite");
+}
+
+static int parse_set_values(const char *p, char *rel_out, char *ver_out,
+			    int *out_has_rel, int *out_has_ver)
+{
+	while (*p) {
+		if ((*p == 'R' || *p == 'T') && *(p + 1) == ':') {
+			int is_rel = (*p == 'R');
+			p += 2;
+			char *dst = is_rel ? rel_out : ver_out;
+			int vlen = 0;
+			while (*p && !((*p == 'R' || *p == 'T') && *(p + 1) == ':')) {
+				if (vlen < FIELD_LEN - 1)
+					dst[vlen++] = *p;
+				p++;
+			}
+			dst[vlen] = '\0';
+			if (is_rel)
+				*out_has_rel = 1;
+			else
+				*out_has_ver = 1;
+		} else {
+			return -(*p);
+		}
+	}
+	return 0;
+}
+
+static int cmd_set(const char *rest, char *resp, int resplen)
+{
+	const char *p = rest;
+	char tmp_rel[FIELD_LEN] = {0};
+	char tmp_ver[FIELD_LEN] = {0};
+	int has_rel = 0, has_ver = 0;
+	int err;
+
+	if (!p || !*p)
+		return snprintf(resp, resplen,
+			"error: usage: set R:<release> T:<version>");
+
+	err = parse_set_values(p, tmp_rel, tmp_ver, &has_rel, &has_ver);
+	if (err < 0)
+		return snprintf(resp, resplen,
+			"error: bad token '%c', use R:<rel> T:<ver>", -err);
+
+	if (!has_rel && !has_ver)
+		return snprintf(resp, resplen,
+			"error: no value specified");
+
+	if (cur_mode == MODE_MEMWRITE)
+		ensure_orig_saved();
+
+	if (has_rel)
+		memcpy(fake_release, tmp_rel, strlen(tmp_rel) + 1);
+	if (has_ver)
+		memcpy(fake_version, tmp_ver, strlen(tmp_ver) + 1);
+	fake_active = 1;
+
+	if (cur_mode == MODE_MEMWRITE)
+		apply_memwrite();
+
+	update_desc();
+
+	return snprintf(resp, resplen,
+		"ok release='%s' version='%s' mode=%s",
+		has_rel ? fake_release : "(unchanged)",
+		has_ver ? fake_version : "(unchanged)",
+		cur_mode == MODE_HOOK ? "hook" : "memwrite");
+}
+
+static struct {
+	const char *name;
+	cmd_handler_t handler;
+} cmd_table[] = {
+	{ "status",	cmd_status	},
+	{ "clear",	cmd_clear	},
+	{ "hook",	cmd_hook	},
+	{ "write",	cmd_write	},
+	{ "set",	cmd_set		},
+};
+
+static void parse_cmd(const char *args, const char **out_cmd,
+		      const char **out_rest, char *buf, int buflen)
+{
+	char *cmd, *rest;
+
+	strncpy(buf, args, buflen - 1);
+	buf[buflen - 1] = '\0';
+
+	cmd = buf;
+	while (*cmd == ' ' || *cmd == '\t')
+		cmd++;
+	rest = cmd;
+	while (*rest && *rest != ' ' && *rest != '\t')
+		rest++;
+	if (*rest) {
+		*rest++ = '\0';
+		while (*rest == ' ' || *rest == '\t')
+			rest++;
+	} else {
+		rest = NULL;
+	}
+
+	*out_cmd = cmd;
+	*out_rest = rest;
+}
+
+static long mu_ctl(const char *args, char *__user out_msg, int outlen)
+{
+	char resp[RESP_BUF_SIZE];
+	char buf[RESP_BUF_SIZE];
+	const char *cmd;
+	const char *rest;
+	int pos, i;
+
+	if (!args || !*args) {
+		pos = snprintf(resp, RESP_BUF_SIZE, "unknown cmd");
+		goto out;
+	}
+
+	parse_cmd(args, &cmd, &rest, buf, sizeof(buf));
+
+	for (i = 0; i < (int)(sizeof(cmd_table) / sizeof(cmd_table[0])); i++) {
+		if (!strcmp(cmd, cmd_table[i].name)) {
+			pos = cmd_table[i].handler(rest, resp, RESP_BUF_SIZE);
+			goto out;
+		}
+	}
+
+	pos = snprintf(resp, RESP_BUF_SIZE, "unknown cmd: %s", args);
+out:
+	if (pos >= RESP_BUF_SIZE)
+		pos = RESP_BUF_SIZE - 1;
+	if (out_msg && outlen > 0)
+		compat_copy_to_user(out_msg, resp, pos + 1);
+	return 0;
+}
+
 static long mu_init(const char *args, const char *event, void *__user reserved)
 {
 	hook_err_t err;
@@ -299,7 +407,7 @@ static long mu_init(const char *args, const char *event, void *__user reserved)
 	(void)event;
 	(void)reserved;
 
-	logkd("[MyUname] INIT kpver=0x%x kver=0x%x", kpver, kver);
+	logkd("[MyUname] INIT kpver=0x%x kver=0x%x mode=hook (default)", kpver, kver);
 
 	locate_desc();
 
@@ -322,10 +430,15 @@ static long mu_init(const char *args, const char *event, void *__user reserved)
 		return -ENOSYS;
 	}
 
-	logkd("[MyUname] uts_name_offset=%d", uts_name_offset);
+	release_ptr = (char *)uts_ns + uts_name_offset +
+		__builtin_offsetof(struct new_utsname, release);
+	version_ptr = (char *)uts_ns + uts_name_offset +
+		__builtin_offsetof(struct new_utsname, version);
 
-	if (args && args[0])
-		mu_ctl(args, NULL, 0);
+	logkd("[MyUname] uts_name_offset=%d release@%llx version@%llx",
+		uts_name_offset,
+		(unsigned long long)release_ptr,
+		(unsigned long long)version_ptr);
 
 	err = hook_syscalln(__NR_uname, 1, before_uname, NULL, NULL);
 	if (err) {
@@ -333,7 +446,10 @@ static long mu_init(const char *args, const char *event, void *__user reserved)
 		return err;
 	}
 
-	logkd("[MyUname] READY");
+	if (args && args[0])
+		mu_ctl(args, NULL, 0);
+
+	logkd("[MyUname] READY (default: hook mode)");
 	return 0;
 }
 
@@ -341,13 +457,22 @@ static long mu_exit(void *__user reserved)
 {
 	(void)reserved;
 
-	fake_active = 0;
-	unhook_syscalln(__NR_uname, before_uname, NULL);
+	if (cur_mode == MODE_MEMWRITE && fake_active && orig_saved)
+		restore_original();
+	else if (cur_mode == MODE_HOOK)
+		unhook_syscalln(__NR_uname, before_uname, NULL);
 
+	fake_active = 0;
+	orig_saved = 0;
+	cur_mode = MODE_HOOK;
 	memset(fake_release, 0, sizeof(fake_release));
 	memset(fake_version, 0, sizeof(fake_version));
+	memset(orig_release, 0, sizeof(orig_release));
+	memset(orig_version, 0, sizeof(orig_version));
 	uts_ns = NULL;
 	uts_name_offset = 0;
+	release_ptr = NULL;
+	version_ptr = NULL;
 	desc_data = NULL;
 	desc_cap = 0;
 	logkd("[MyUname] EXIT");
