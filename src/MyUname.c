@@ -129,9 +129,13 @@ static void apply_memwrite(void)
 
 	if (fake_release[0])
 		memcpy(release_ptr, fake_release, strlen(fake_release) + 1);
+	else
+		release_ptr[0] = '\0';
 
 	if (fake_version[0])
 		memcpy(version_ptr, fake_version, strlen(fake_version) + 1);
+	else
+		version_ptr[0] = '\0';
 
 	logki("[MyUname] memwritten release='%s' version='%s'",
 		fake_release, fake_version);
@@ -149,23 +153,10 @@ static void restore_original(void)
 		orig_release, orig_version);
 }
 
-static void ensure_orig_saved(void)
-{
-	if (orig_saved)
-		return;
-	memcpy(orig_release, release_ptr, FIELD_LEN);
-	memcpy(orig_version, version_ptr, FIELD_LEN);
-	orig_saved = 1;
-	logki("[MyUname] original saved: release='%s' version='%s'",
-		orig_release, orig_version);
-}
-
 static void before_uname(hook_fargs1_t *args, void *udata);
 
 static void switch_to_hook(void)
 {
-	hook_err_t err;
-
 	if (cur_mode == MODE_HOOK)
 		return;
 
@@ -173,9 +164,6 @@ static void switch_to_hook(void)
 		restore_original();
 
 	cur_mode = MODE_HOOK;
-	err = hook_syscalln(__NR_uname, 1, before_uname, NULL, NULL);
-	if (err)
-		logke("[MyUname] hook uname failed: %d", err);
 	logki("[MyUname] mode -> hook");
 }
 
@@ -187,7 +175,13 @@ static void switch_to_memwrite(void)
 	unhook_syscalln(__NR_uname, before_uname, NULL);
 
 	if (fake_active) {
-		ensure_orig_saved();
+		if (!orig_saved) {
+			memcpy(orig_release, release_ptr, FIELD_LEN);
+			memcpy(orig_version, version_ptr, FIELD_LEN);
+			orig_saved = 1;
+			logki("[MyUname] original saved: release='%s' version='%s'",
+				orig_release, orig_version);
+		}
 		apply_memwrite();
 	}
 
@@ -221,176 +215,171 @@ static void before_uname(hook_fargs1_t *args, void *udata)
 	args->skip_origin = 1;
 }
 
-typedef int (*cmd_handler_t)(const char *rest, char *resp, int resplen);
-
-static int cmd_status(const char *rest, char *resp, int resplen)
-{
-	(void)rest;
-	return snprintf(resp, resplen,
-		"active=%d mode=%s release='%s' version='%s' desc=%s",
-		fake_active,
-		cur_mode == MODE_HOOK ? "hook" : "memwrite",
-		fake_active && fake_release[0] ? fake_release : "(real)",
-		fake_active && fake_version[0] ? fake_version : "(real)",
-		desc_data ? "ok" : "n/a");
-}
-
-static int cmd_clear(const char *rest, char *resp, int resplen)
-{
-	(void)rest;
-	if (cur_mode == MODE_MEMWRITE && fake_active && orig_saved)
-		restore_original();
-	fake_active = 0;
-	memset(fake_release, 0, sizeof(fake_release));
-	memset(fake_version, 0, sizeof(fake_version));
-	update_desc();
-	return snprintf(resp, resplen, "cleared");
-}
-
-static int cmd_hook(const char *rest, char *resp, int resplen)
-{
-	(void)rest;
-	switch_to_hook();
-	update_desc();
-	return snprintf(resp, resplen, "ok mode=hook");
-}
-
-static int cmd_write(const char *rest, char *resp, int resplen)
-{
-	(void)rest;
-	switch_to_memwrite();
-	update_desc();
-	return snprintf(resp, resplen, "ok mode=memwrite");
-}
-
-static int parse_set_values(const char *p, char *rel_out, char *ver_out,
-			    int *out_has_rel, int *out_has_ver)
-{
-	while (*p) {
-		if ((*p == 'R' || *p == 'T') && *(p + 1) == ':') {
-			int is_rel = (*p == 'R');
-			p += 2;
-			char *dst = is_rel ? rel_out : ver_out;
-			int vlen = 0;
-			while (*p && !((*p == 'R' || *p == 'T') && *(p + 1) == ':')) {
-				if (vlen < FIELD_LEN - 1)
-					dst[vlen++] = *p;
-				p++;
-			}
-			dst[vlen] = '\0';
-			if (is_rel)
-				*out_has_rel = 1;
-			else
-				*out_has_ver = 1;
-		} else {
-			return -(*p);
-		}
-	}
-	return 0;
-}
-
-static int cmd_set(const char *rest, char *resp, int resplen)
-{
-	const char *p = rest;
-	char tmp_rel[FIELD_LEN] = {0};
-	char tmp_ver[FIELD_LEN] = {0};
-	int has_rel = 0, has_ver = 0;
-	int err;
-
-	if (!p || !*p)
-		return snprintf(resp, resplen,
-			"error: usage: set R:<release> T:<version>");
-
-	err = parse_set_values(p, tmp_rel, tmp_ver, &has_rel, &has_ver);
-	if (err < 0)
-		return snprintf(resp, resplen,
-			"error: bad token '%c', use R:<rel> T:<ver>", -err);
-
-	if (!has_rel && !has_ver)
-		return snprintf(resp, resplen,
-			"error: no value specified");
-
-	if (cur_mode == MODE_MEMWRITE)
-		ensure_orig_saved();
-
-	if (has_rel)
-		memcpy(fake_release, tmp_rel, strlen(tmp_rel) + 1);
-	if (has_ver)
-		memcpy(fake_version, tmp_ver, strlen(tmp_ver) + 1);
-	fake_active = 1;
-
-	if (cur_mode == MODE_MEMWRITE)
-		apply_memwrite();
-
-	update_desc();
-
-	return snprintf(resp, resplen,
-		"ok release='%s' version='%s' mode=%s",
-		has_rel ? fake_release : "(unchanged)",
-		has_ver ? fake_version : "(unchanged)",
-		cur_mode == MODE_HOOK ? "hook" : "memwrite");
-}
-
-static struct {
-	const char *name;
-	cmd_handler_t handler;
-} cmd_table[] = {
-	{ "status",	cmd_status	},
-	{ "clear",	cmd_clear	},
-	{ "hook",	cmd_hook	},
-	{ "write",	cmd_write	},
-	{ "set",	cmd_set		},
-};
-
-static void parse_cmd(const char *args, const char **out_cmd,
-		      const char **out_rest, char *buf, int buflen)
-{
-	char *cmd, *rest;
-
-	strncpy(buf, args, buflen - 1);
-	buf[buflen - 1] = '\0';
-
-	cmd = buf;
-	while (*cmd == ' ' || *cmd == '\t')
-		cmd++;
-	rest = cmd;
-	while (*rest && *rest != ' ' && *rest != '\t')
-		rest++;
-	if (*rest) {
-		*rest++ = '\0';
-		while (*rest == ' ' || *rest == '\t')
-			rest++;
-	} else {
-		rest = NULL;
-	}
-
-	*out_cmd = cmd;
-	*out_rest = rest;
-}
-
 static long mu_ctl(const char *args, char *__user out_msg, int outlen)
 {
 	char resp[RESP_BUF_SIZE];
 	char buf[RESP_BUF_SIZE];
-	const char *cmd;
-	const char *rest;
-	int pos, i;
+	int pos;
+	char *cmd;
+	char *rest;
 
 	if (!args || !*args) {
 		pos = snprintf(resp, RESP_BUF_SIZE, "unknown cmd");
 		goto out;
 	}
 
-	parse_cmd(args, &cmd, &rest, buf, sizeof(buf));
+	strncpy(buf, args, RESP_BUF_SIZE - 1);
+	buf[RESP_BUF_SIZE - 1] = '\0';
 
-	for (i = 0; i < (int)(sizeof(cmd_table) / sizeof(cmd_table[0])); i++) {
-		if (!strcmp(cmd, cmd_table[i].name)) {
-			pos = cmd_table[i].handler(rest, resp, RESP_BUF_SIZE);
+	cmd = buf;
+	while (*cmd == ' ' || *cmd == '\t') cmd++;
+	rest = cmd;
+	while (*rest && *rest != ' ' && *rest != '\t') rest++;
+	if (*rest) {
+		*rest++ = '\0';
+		while (*rest == ' ' || *rest == '\t') rest++;
+	} else {
+		rest = NULL;
+	}
+
+	if (!strcmp(cmd, "status")) {
+		pos = snprintf(resp, RESP_BUF_SIZE,
+			"active=%d mode=%s release='%s' version='%s' desc=%s",
+			fake_active,
+			cur_mode == MODE_HOOK ? "hook" : "memwrite",
+			fake_active && fake_release[0] ? fake_release : "(real)",
+			fake_active && fake_version[0] ? fake_version : "(real)",
+			desc_data ? "ok" : "n/a");
+		if (rest && rest[0])
+			goto run_rest;
+		goto out;
+	}
+
+	if (!strcmp(cmd, "clear")) {
+		if (cur_mode == MODE_MEMWRITE && fake_active && orig_saved)
+			restore_original();
+		fake_active = 0;
+		memset(fake_release, 0, sizeof(fake_release));
+		memset(fake_version, 0, sizeof(fake_version));
+		update_desc();
+		pos = snprintf(resp, RESP_BUF_SIZE, "cleared");
+		if (rest && rest[0])
+			goto run_rest;
+		goto out;
+	}
+
+	if (!strcmp(cmd, "hook")) {
+		hook_err_t err;
+		int was_memwrite = (cur_mode == MODE_MEMWRITE);
+		switch_to_hook();
+		if (was_memwrite) {
+			err = hook_syscalln(__NR_uname, 1, before_uname, NULL, NULL);
+			if (err)
+				logke("[MyUname] hook uname failed: %d", err);
+		}
+		if (rest && rest[0]) {
+			mu_ctl(rest, out_msg, outlen);
+			return 0;
+		}
+		update_desc();
+		pos = snprintf(resp, RESP_BUF_SIZE, "ok mode=hook");
+		goto out;
+	}
+
+	if (!strcmp(cmd, "write")) {
+		switch_to_memwrite();
+		if (rest && rest[0]) {
+			mu_ctl(rest, out_msg, outlen);
+			return 0;
+		}
+		update_desc();
+		pos = snprintf(resp, RESP_BUF_SIZE, "ok mode=memwrite");
+		goto out;
+	}
+
+	if (!strcmp(cmd, "set")) {
+		const char *p = rest;
+
+		if (!p || !*p) {
+			pos = snprintf(resp, RESP_BUF_SIZE,
+				"error: usage: set R:<release> T:<version>");
 			goto out;
 		}
+
+		char tmp_rel[FIELD_LEN] = {0};
+		char tmp_ver[FIELD_LEN] = {0};
+		int has_rel = 0, has_ver = 0;
+
+		while (*p) {
+			if ((*p == 'R' || *p == 'T') && *(p + 1) == ':') {
+				int is_rel = (*p == 'R');
+				p += 2;
+				char *dst = is_rel ? tmp_rel : tmp_ver;
+				int vlen = 0;
+
+				while (*p == ' ' || *p == '\t')
+					p++;
+				while (*p && !((*p == 'R' || *p == 'T') && *(p + 1) == ':')) {
+					if (vlen < FIELD_LEN - 1)
+						dst[vlen++] = *p;
+					p++;
+				}
+				while (vlen > 0 && (dst[vlen - 1] == ' ' || dst[vlen - 1] == '\t'))
+					vlen--;
+				dst[vlen] = '\0';
+				if (is_rel) has_rel = 1; else has_ver = 1;
+			} else {
+				break;
+			}
+		}
+
+		if (!has_rel && !has_ver) {
+			pos = snprintf(resp, RESP_BUF_SIZE,
+				"error: no value specified");
+			goto out;
+		}
+
+		if (cur_mode == MODE_MEMWRITE && !orig_saved) {
+			memcpy(orig_release, release_ptr, FIELD_LEN);
+			memcpy(orig_version, version_ptr, FIELD_LEN);
+			orig_saved = 1;
+			logki("[MyUname] original saved: release='%s' version='%s'",
+				orig_release, orig_version);
+		}
+
+		if (has_rel)
+			memcpy(fake_release, tmp_rel, strlen(tmp_rel) + 1);
+		if (has_ver)
+			memcpy(fake_version, tmp_ver, strlen(tmp_ver) + 1);
+		fake_active = 1;
+
+		if (cur_mode == MODE_MEMWRITE)
+			apply_memwrite();
+
+		update_desc();
+
+		pos = snprintf(resp, RESP_BUF_SIZE,
+			"ok release='%s' version='%s' mode=%s",
+			has_rel ? fake_release : "(unchanged)",
+			has_ver ? fake_version : "(unchanged)",
+			cur_mode == MODE_HOOK ? "hook" : "memwrite");
+
+		while (*p == ' ' || *p == '\t') p++;
+		if (*p) {
+			rest = (char *)p;
+			goto run_rest;
+		}
+		goto out;
 	}
 
 	pos = snprintf(resp, RESP_BUF_SIZE, "unknown cmd: %s", args);
+	goto out;
+
+run_rest:
+	if (rest && rest[0]) {
+		mu_ctl(rest, out_msg, outlen);
+		return 0;
+	}
 out:
 	if (pos >= RESP_BUF_SIZE)
 		pos = RESP_BUF_SIZE - 1;
