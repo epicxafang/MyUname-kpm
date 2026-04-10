@@ -5,14 +5,14 @@ All notable changes to this project will be documented in this file.
 ## [0.3.0] - 2026-04-10
 
 ### Added
-- **双模式运行** — 新增 `hook`（syscall 拦截）和 `write`（直接覆写内核内存）两种模式，通过 `hook` / `write` 命令切换；模块描述实时显示当前模式标签 `[hook]` / `[mem]`
+- 新增 `hook` / `write` 命令，支持 hook 拦截和内核内存直写两种模式切换
+- `status` 输出新增当前模式字段
 
 ### Changed
-- **命令分发重构为表驱动架构** — `mu_ctl` 从扁平 if-else 链改为 `cmd_table[]` 分发表，各命令独立为 `cmd_*` handler 函数，新增命令只需添加一条表项
-- **提取公共逻辑消除重复** — `ensure_orig_saved()` 统一管理原始值备份，`parse_set_values()` 独立 R:/T: 参数解析，`parse_cmd()` 封装命令词法分析
-- **`switch_to_hook()` 自包含化** — 内置 `hook_syscalln()` 安装，与 `switch_to_memwrite()` 完全对称
-- **`clear` 命令** — memwrite 模式下先恢复原始值再清除参数
-- **`status` 输出增强** — 新增 `mode=hook/memwrite` 字段
+- 命令处理从 if-else 链改为表驱动（`cmd_table[]`），各命令拆分为独立 handler 函数
+- 提取 `ensure_orig_saved()`、`parse_set_values()`、`parse_cmd()` 消除重复逻辑
+- `switch_to_hook()` 内置 hook 安装，与 `switch_to_memwrite()` 对称
+- `clear` 在 memwrite 模式下先恢复原始值
 
 ## [0.2.0] - 2026-04-10
 
