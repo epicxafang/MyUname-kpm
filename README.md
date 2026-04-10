@@ -10,11 +10,14 @@
 
 | 命令 | 说明 |
 |------|------|
-| `set R:5.15.0 T:#1-SMP Mon Apr 4 12:00:00 UTC 2026` | 同时设置版本号和构建时间 |
-| `set R:6.6.666` | 仅设置版本号 |
-| `set T:Mon Jan 1 00:00:00 UTC 2026` | 仅设置构建时间 |
-| `status` | 查看当前状态（`dmesg \| grep MyUname`） |
+| `set R:5.15.0 T:#1-SMP Mon Apr 4 12:00:00 UTC 2026` | 设置版本号和构建时间 |
+| `set R:6.6.666` / `set T:Mon Jan 1 ...` | 仅设置其中一项 |
+| `hook` | 切换至 hook 模式（默认，拦截 syscall） |
+| `write` | 切换至 memwrite 模式（直接覆写内核内存） |
+| `status` | 查看当前状态和模式（`dmesg \| grep MyUname`） |
 | `clear` | 清除伪装，恢复真实信息 |
+
+> hook 模式仅拦截 syscall 路径；memwrite 模式直接修改内核数据，覆盖面更广但需在切换回 hook 或卸载时恢复原始值。
 
 可随时修改，无需重启，卡片描述实时更新。
 
@@ -23,6 +26,8 @@
 ```bash
 sc_kpm_load key ./MyUname.kpm "set R:5.15.0 T:#1-SMP Mon Apr 4 12:00:00 UTC 2026"
 sc_kpm_control key "MyUname" "set R:4.19.0"
+sc_kpm_control key "MyUname" "write"       # 切换至 memwrite 模式
+sc_kpm_control key "MyUname" "hook"        # 切回 hook 模式
 sc_kpm_control key "MyUname" "clear"
 ```
 
